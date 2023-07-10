@@ -3,11 +3,17 @@ import concurrent
 import functools
 import inspect
 import threading
+import typing as t
+
 from threading import Thread
-from typing import Generic, TypeVar
+
+T = t.TypeVar('T')
+Param = t.ParamSpec("Param")
+RetType = t.TypeVar("RetType")
+OriginalFunc = t.Callable[Param, RetType]
+
 
 class unsync_meta(type):
-
     def _init_loop(cls):
         cls._loop = asyncio.new_event_loop()
         cls._thread = Thread(target=cls._thread_target, args=(cls._loop,), daemon=True)
@@ -17,25 +23,28 @@ class unsync_meta(type):
     def loop(cls):
         if getattr(cls, '_loop', None) is None:
             unsync_meta._init_loop(cls)
+
         return cls._loop
 
     @property
     def thread(cls):
         if getattr(cls, '_thread', None) is None:
             unsync_meta._init_loop(cls)
+
         return cls._thread
 
     @property
     def process_executor(cls):
         if getattr(cls, '_process_executor', None) is None:
             cls._process_executor = concurrent.futures.ProcessPoolExecutor()
+
         return cls._process_executor
 
 
 class unsync(object, metaclass=unsync_meta):
     thread_executor = concurrent.futures.ThreadPoolExecutor()
-    process_executor = None
-    unsync_functions = {}
+    process_executor: t.Optional[concurrent.futures.ProcessPoolExecutor] = None
+    unsync_functions: t.Mapping[t.Tuple[str, str], OriginalFunc] = {}
 
     @staticmethod
     def _thread_target(loop):
@@ -45,7 +54,7 @@ class unsync(object, metaclass=unsync_meta):
     def __init__(self, *args, **kwargs):
         self.args = []
         self.kwargs = {}
-        if len(args) == 1 and _isfunction(args[0]):
+        if len(args) == 1 and self._isfunction(args[0]):
             self._set_func(args[0])
         else:
             self.args = args
@@ -57,7 +66,7 @@ class unsync(object, metaclass=unsync_meta):
         return 'cpu_bound' in self.kwargs and self.kwargs['cpu_bound']
 
     def _set_func(self, func):
-        assert _isfunction(func)
+        assert self._isfunction(func)
         self.func = func
         functools.update_wrapper(self, func)
         # On Windows/Mac MP turns the main module into __mp_main__ in multiprocess targets
@@ -75,7 +84,7 @@ class unsync(object, metaclass=unsync_meta):
         else:
             if self.cpu_bound:
                 future = unsync.process_executor.submit(
-                    _multiprocess_target, (self.func.__module__, self.func.__name__), *args, **kwargs)
+                    self._multiprocess_target, (self.func.__module__, self.func.__name__), *args, **kwargs)
             else:
                 future = unsync.thread_executor.submit(self.func, *args, **kwargs)
         return Unfuture(future)
@@ -87,20 +96,17 @@ class unsync(object, metaclass=unsync_meta):
         functools.update_wrapper(_call, self.func)
         return _call
 
+    @staticmethod
+    def _isfunction(obj):
+        return callable(obj)
 
-def _isfunction(obj):
-    return callable(obj)
-
-
-def _multiprocess_target(func_name, *args, **kwargs):
-    __import__(func_name[0])
-    return unsync.unsync_functions[func_name](*args, **kwargs)
-
-
-T = TypeVar('T')
+    @staticmethod
+    def _multiprocess_target(func_name, *args, **kwargs):
+        __import__(func_name[0])
+        return unsync.unsync_functions[func_name](*args, **kwargs)
 
 
-class Unfuture(Generic[T]):
+class Unfuture(t.Generic[T]):
     @staticmethod
     def from_value(value):
         future = Unfuture()
